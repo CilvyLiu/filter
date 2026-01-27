@@ -1,4 +1,6 @@
 streamlit
+akshare
 pandas
 requests
-yfinance
+lxml
+numpy
