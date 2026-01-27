@@ -1,28 +1,60 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
-from datetime import datetime
 import requests
 from xml.etree import ElementTree
 from collections import Counter
+from datetime import datetime
+import akshare as ak
 
-# =========================
+# ------------------------
 # 1️⃣ 页面配置
-# =========================
+# ------------------------
 st.set_page_config(
-    page_title="Nova 穿透式投研系统 (云端版)",
+    page_title="Nova A股投行+行业决策看板",
+    page_icon="🛡️",
     layout="wide"
 )
 
-# =========================
-# 2️⃣ 全球视角政策新闻抓取 (RSS)
-# =========================
+# ------------------------
+# 2️⃣ 配置字典 (由 Nova 提供并优化对齐)
+# ------------------------
+KEY_WEIGHTS = {
+    # 投行及政策类
+    '回购': 5, '增持': 5, '并购': 4, 'IPO': 4, '限售解禁': 4, '分红': 3, '降准': 3, '注册制': 3, '融资融券': 2,
+    # 行业及板块类
+    '化工': 4, '原材料': 4, '新能源': 4, '医药': 4, '科技': 4, '地产': 3, '能源': 4, '钢铁': 3, '电池': 3, '光伏': 3
+}
+
+# 映射字典：确保与 AkShare/同花顺标准名对齐
+KEYWORD_TO_SECTOR = {
+    '新能源': '电力设备',
+    '化工': '基础化工',
+    '原材料': '建筑材料',
+    '医药': '医药生物',
+    '科技': '半导体及元件',
+    '地产': '房地产开发',
+    '能源': '石油加工贸易',
+    '钢铁': '钢铁',
+    '电池': '电力设备',
+    '光伏': '光伏设备',
+    '回购': '中字头',
+    '增持': '沪深300',
+    '并购': '资产重组',
+    'IPO': '次新股'
+}
+
+# ------------------------
+# 3️⃣ 数据抓取 (不封 IP 版)
+# ------------------------
 @st.cache_data(ttl=600)
-def fetch_global_finance_news(limit=15):
-    """使用 RSS 抓取财经动态，避开财联社对海外 IP 封锁"""
+def fetch_ib_news(limit=35):
+    """通过 RSS 抓取投行及行业政策新闻"""
     try:
-        url = "https://news.google.com/rss/search?q=中国经济+政策+回购&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-        res = requests.get(url, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        # 搜索组合：合并了你提供的所有核心热词
+        search_query = "投资银行+并购+回购+IPO+化工+原材料+新能源+医药"
+        url = f"https://news.google.com/rss/search?q={search_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        res = requests.get(url, headers=headers, timeout=10)
         root = ElementTree.fromstring(res.content)
         records = []
         for item in root.findall('.//item')[:limit]:
@@ -30,131 +62,104 @@ def fetch_global_finance_news(limit=15):
                 "title": item.find('title').text,
                 "link": item.find('link').text,
                 "time": item.find('pubDate').text,
-                "content": item.find('title').text # RSS 摘要通常在标题里
+                "content": item.find('title').text
             })
         return pd.DataFrame(records)
     except Exception as e:
-        print("RSS新闻抓取异常:", e)
         return pd.DataFrame()
 
-# =========================
-# 3️⃣ 跨境行情获取 (Yahoo Finance)
-# =========================
-@st.cache_data(ttl=3600)
-def get_global_market_snapshot():
-    """获取主要指数和中概股行情"""
-    try:
-        tickers = {
-            "沪深300 (ASHR)": "ASHR",
-            "恒生指数": "^HSI",
-            "腾讯控股": "0700.HK",
-            "阿里巴巴": "BABA"
-        }
-        data = []
-        for name, symbol in tickers.items():
-            t = yf.Ticker(symbol)
-            info = t.fast_info
-            data.append({
-                "名称": name,
-                "最新价": round(info['last_price'], 2),
-                "当日涨跌": f"{round(info['last_prev_close_diff_pct'] * 100, 2)}%",
-                "代码": symbol
-            })
-        return pd.DataFrame(data)
-    except Exception as e:
-        print("Yahoo Finance行情抓取异常:", e)
-        return pd.DataFrame()
-
-# =========================
-# 4️⃣ 新闻热词计算
-# =========================
-def calc_hotwords(df, top_n=20, manual_key=None):
-    """提取新闻标题内容中的热词，并按频率排序"""
-    counter = Counter()
-    key_weights = {'回购': 5, '注销': 5, '市值管理': 4, '降准': 3}
+# ------------------------
+# 4️⃣ 核心处理逻辑
+# ------------------------
+def calculate_hotwords(df, manual_key=None):
+    """应用 Nova 专家权重字典"""
+    current_weights = KEY_WEIGHTS.copy()
     if manual_key:
-        key_weights[manual_key] = 10
+        current_weights[manual_key] = 10  # 手动干预设为最高权重
+
+    counter = Counter()
     for text in df['content']:
-        for w, weight in key_weights.items():
-            if w in str(text):
-                counter[w] += weight
-    return pd.DataFrame(counter.most_common(top_n), columns=["word", "count"])
+        for k, w in current_weights.items():
+            if k in str(text):
+                counter[k] += w
+    
+    res_df = pd.DataFrame(counter.most_common(20), columns=["word", "权重分"])
+    res_df['板块'] = res_df['word'].apply(lambda x: KEYWORD_TO_SECTOR.get(x, '其他/综合'))
+    return res_df
 
-# =========================
-# 5️⃣ 新闻搜索
-# =========================
-def search_news(df, keyword):
-    """搜索新闻中包含指定关键词的条目"""
-    return df[df['content'].str.contains(keyword, na=False)]
+@st.cache_data(ttl=1800)
+def get_sector_stocks(sector_name):
+    """下钻获取 A 股成分股行情"""
+    if sector_name in ['其他/综合', '综合']: return pd.DataFrame()
+    try:
+        # 路径 A: 同花顺行业成分 (本地运行成功率极高)
+        df = ak.stock_board_cons_ths(symbol=sector_name)
+        return df[['股票代码', '股票名称', '最新价', '涨跌幅']].head(20)
+    except:
+        return pd.DataFrame()
 
-# =========================
-# 6️⃣ Streamlit UI
-# =========================
-st.title("🛡️ Nova 穿透式投研决策看板 (云端隔离版)")
-st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ------------------------
+# 5️⃣ UI 渲染层
+# ------------------------
+st.title("🛡️ Nova A股投行+行业决策看板")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据流模式: RSS 穿透隔离")
 
-# -------------------------
-# 6.1 手动注入关键词
-# -------------------------
-st.sidebar.header("🔍 手动干预")
-manual_key = st.sidebar.text_input("手动注入关键词", placeholder="如：回购/降准")
+# 7.1 侧边栏
+st.sidebar.header("🔍 审计干预")
+manual_key = st.sidebar.text_input("注入临时关键词", placeholder="如：市值管理")
 
-# -------------------------
-# 6.2 全球政策新闻 & 热词
-# -------------------------
-st.subheader("🚩 全球视角政策监测")
-news_df = fetch_global_finance_news()
+# 获取数据
+news_df = fetch_ib_news()
 
 if not news_df.empty:
-    hotwords_df = calc_hotwords(news_df, manual_key=manual_key)
-    st.markdown("**🔥 热词排行榜**")
-    st.dataframe(hotwords_df, use_container_width=True)
+    # 7.2 热词排行榜
+    st.subheader("🔥 实时热度权重榜")
+    hotwords_df = calculate_hotwords(news_df, manual_key)
+    st.dataframe(hotwords_df, use_container_width=True, hide_index=True)
 
-    st.markdown("**🔍 新闻搜索**")
-    keyword = st.text_input("输入关键词进行搜索", placeholder="如降准/国企改革/新能源")
-    if keyword:
-        result_df = search_news(news_df, keyword)
-        if not result_df.empty:
-            st.write(f"共 {len(result_df)} 条相关新闻：")
-            for _, row in result_df.iterrows():
-                with st.expander(f"{row['title']} | {row['time']}"):
-                    st.write(row['content'])
+    # 布局展示
+    col1, col2 = st.columns([2, 3])
+
+    with col1:
+        st.subheader("📰 最新政策快讯")
+        for _, row in news_df.head(10).iterrows():
+            with st.expander(f"{row['title']}", expanded=False):
+                st.write(f"发布时间: {row['time']}")
+                st.markdown(f"[原文链接]({row['link']})")
+
+    with col2:
+        st.subheader("🏭 行业穿透行情")
+        # 联动：根据热度榜选择板块
+        sector_options = [s for s in hotwords_df['板块'].unique() if s != '其他/综合']
+        if sector_options:
+            selected_sector = st.selectbox("选择热点板块查看成分股", sector_options)
+            if selected_sector:
+                stocks = get_sector_stocks(selected_sector)
+                if not stocks.empty:
+                    st.success(f"已锁定 {selected_sector} 核心成分股行情")
+                    st.dataframe(stocks, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"云端接口暂无法直接穿透 {selected_sector} 行情，建议本地运行。")
         else:
-            st.info("暂无匹配相关新闻")
-else:
-    st.error("数据抓取受限，请检查网络或稍后刷新")
+            st.info("当前热词暂无特定行业映射，请查看宏观快讯。")
 
-# -------------------------
-# 6.3 跨境行情看板
-# -------------------------
-st.divider()
-st.subheader("📊 跨境定价锚点 (ASHR / HSI / 中概股)")
-market_data = get_global_market_snapshot()
-if not market_data.empty:
-    st.table(market_data)
-else:
-    st.warning("跨境行情获取失败，请稍后重试")
+    # 7.3 搜索功能
+    st.divider()
+    st.subheader("🔍 深度穿透搜索")
+    search_key = st.text_input("搜索新闻全文", placeholder="输入关键词...")
+    if search_key:
+        search_res = news_df[news_df['content'].str.contains(search_key)]
+        st.write(f"共发现 {len(search_res)} 条关联信息：")
+        st.dataframe(search_res[['time', 'title']], use_container_width=True)
 
-# -------------------------
-# 6.4 终极排查指南
-# -------------------------
-st.divider()
-with st.expander("🛠️ 云端网页显示受阻排查指南"):
-    st.markdown("""
-    **Nova 提示：**
-    
-    1. **本地运行最稳定**：
-       ```bash
-       pip install streamlit yfinance pandas requests
-       streamlit run app.py
-       ```
-       使用本地网络访问财联社或 Yahoo Finance 接口 100% 成功。
-    
-    2. **云端策略**：
-       - 可以尝试国内代理 IP 或 VPN。
-       - 云端容器对国外接口可能限制严格。
-    
-    3. **RSS + Yahoo Finance 是云端最稳方案**：
-       - 已经避免依赖财联社海外 IP。
-       - 热词和新闻搜索逻辑完全保留。
-    """)
+else:
+    st.error("❌ 数据源连接受阻。请检查 AkShare 是否更新到最新版本，或在本地网络环境下运行。")
+
+# 7.4 审计脚注
+st.markdown("---")
+st.markdown("""
+<div style='text-align:center; color:gray; font-size:0.8em;'>
+逻辑：[RSS抓取] -> [词权加分] -> [行业映射] -> [行情下钻]<br>
+Nova，当前系统已集成你提供的所有行业映射，实现了从政策到个股的穿透审计。
+</div>
+""", unsafe_allow_html=True)
