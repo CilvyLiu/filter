@@ -3,29 +3,73 @@ import pandas as pd
 import requests
 from collections import Counter
 from datetime import datetime
-import re
 from xml.etree import ElementTree
 
 # -----------------------------
 # 1️⃣ 页面配置
 # -----------------------------
-st.set_page_config(page_title="Nova 投行级新闻看板 (穿透版)", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Nova 投行级穿透看板 (稳定版)", page_icon="🛡️", layout="wide")
 st.title("🛡️ 投行级新闻板块穿透系统")
-st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据流状态: 穿透隔离模式")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 镜像流+不限流行情")
 
 # -----------------------------
-# 2️⃣ 核心数据抓取 (RSS 镜像流)
+# 2️⃣ 核心数据字典 (关联词簇 + 核心权重股)
 # -----------------------------
-@st.cache_data(ttl=600)
-def fetch_news_stable():
+# 增加 keywords 用于主动搜索镜像，增加 stocks 用于不限流行情展示
+SECTOR_CONFIG = {
+    "医药": {"keywords": "医药+生物+创新药+集采", "stocks": ["600276", "300760", "603259"]},
+    "新能源": {"keywords": "锂电+宁德时代+储能+光伏", "stocks": ["300750", "002594", "300274"]},
+    "科技": {"keywords": "半导体+芯片+华为+AI", "stocks": ["603501", "688981", "002415"]},
+    "低空经济": {"keywords": "无人机+飞行汽车+eVTOL+空管", "stocks": ["002085", "000099", "600677"]},
+    "化工": {"keywords": "化工+涨价+材料+产能", "stocks": ["600309", "002493", "600096"]},
+    "综合/重组": {"keywords": "并购+重组+重组+股权转让", "stocks": ["600104", "000157", "600606"]}
+}
+
+# -----------------------------
+# 3️⃣ 不限流个股行情接口 (新浪财经保底)
+# -----------------------------
+@st.cache_data(ttl=60)
+def get_realtime_stocks(sector_name):
+    """利用新浪财经 HTML 接口，规避东财 JSON 限流"""
+    stock_ids = SECTOR_CONFIG.get(sector_name, {}).get("stocks", ["600519"])
+    # 构造新浪格式 sh600276,sz300760
+    formatted_ids = ",".join([f"sh{s}" if s.startswith('6') else f"sz{s}" for s in stock_ids])
+    url = f"http://hq.sinajs.cn/list={formatted_ids}"
+    
     try:
-        # 使用 Google News 聚合，确保 2026 年云端部署不被财联社 WAF 封锁
-        url = "https://news.google.com/rss/search?q=财联社+并购+回购+IPO+板块+异动&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        # 新浪需要 Referer 伪装
+        headers = {"Referer": "http://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5).text
+        
+        data = []
+        for line in res.splitlines():
+            if '"' in line:
+                parts = line.split('"')[1].split(',')
+                if len(parts) > 4:
+                    name, price, prev_close = parts[0], float(parts[3]), float(parts[2])
+                    change = (price - prev_close) / prev_close * 100
+                    data.append({"名称": name, "最新价": f"{price:.2f}", "涨跌幅": f"{change:+.2f}%"})
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
+
+# -----------------------------
+# 4️⃣ 主动联动抓取新闻 (解决“没新闻”问题)
+# -----------------------------
+@st.cache_data(ttl=300)
+def fetch_news_via_mirror(query=""):
+    """
+    联动逻辑：不再被动等待，而是根据板块 query 主动请求 Google/镜像 RSS
+    """
+    try:
+        # 搜索组合：财联社 + 板块核心词
+        search_query = f"财联社+{query}"
+        url = f"https://news.google.com/rss/search?q={search_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
         root = ElementTree.fromstring(res.content)
         records = []
-        for item in root.findall('.//item')[:50]:
+        for item in root.findall('.//item')[:15]:
             records.append({
                 "title": item.find('title').text,
                 "time": item.find('pubDate').text,
@@ -35,107 +79,53 @@ def fetch_news_stable():
     except:
         return pd.DataFrame()
 
-# -----------------------------
-# 3️⃣ 板块代码库与关联词簇 (核心扩充)
-# -----------------------------
-SECTOR_CONFIG = {
-    "新能源": {"code": "BK0998", "keywords": ["锂电", "电池", "宁德", "储能", "电网", "光伏"]},
-    "化工": {"code": "BK0436", "keywords": ["涨价", "材料", "磷", "氟", "产能", "炼化"]},
-    "原材料": {"code": "BK0486", "keywords": ["水泥", "建材", "钢铁", "矿产", "金属"]},
-    "医药": {"code": "BK0506", "keywords": ["生物", "创新药", "集采", "临床", "疫苗"]},
-    "综合/重组": {"code": "BK0110", "keywords": ["并购", "重组", "股权", "壳资源", "资产"]},
-    "光伏": {"code": "BK0933", "keywords": ["组件", "硅片", "隆基", "逆变器", "多晶硅"]},
-    "AI": {"code": "BK1096", "keywords": ["大模型", "算力", "芯片", "英伟达", "智算"]},
-    "元宇宙": {"code": "BK1009", "keywords": ["虚拟现实", "VR", "AR", "数字人", "沉浸"]},
-    "低空经济": {"code": "BK1158", "keywords": ["无人机", "飞行汽车", "eVTOL", "空管"]},
-    "科技": {"code": "BK0707", "keywords": ["半导体", "集成电路", "封测", "光刻机"]},
-    "地产": {"code": "BK0451", "keywords": ["存量房", "房贷", "土拍", "收储", "保障房"]}
-}
-
-@st.cache_data(ttl=3600)
-def get_sector_stocks():
-    sector_data = {}
-    for name, config in SECTOR_CONFIG.items():
-        try:
-            url = f"http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=15&po=1&np=1&fltt=2&invt=2&fs=b:{config['code']}&fields=f12,f14"
-            res = requests.get(url, timeout=5).json()
-            stocks = [f"{item['f14']}({item['f12']})" for item in res.get('data', {}).get('diff', [])]
-            sector_data[name] = stocks
-        except:
-            sector_data[name] = []
-    return sector_data
-
-# -----------------------------
-# 4️⃣ 穿透映射逻辑
-# -----------------------------
-def filter_news_by_sector(news_df, sector_name):
-    if news_df.empty: return news_df
-    
-    # 获取该板块的关联特征词
-    config = SECTOR_CONFIG.get(sector_name, {})
-    keywords = [sector_name] + config.get("keywords", [])
-    
-    # 投行通用高权词
-    keywords += ["回购", "增持", "并购", "异动"]
-    
-    # 构建正则匹配模式
-    pattern = "|".join(keywords)
-    return news_df[news_df['title'].str.contains(pattern, case=False, na=False)]
-
 # =========================
-# 5️⃣ Streamlit UI
+# 5️⃣ Streamlit UI 交互
 # =========================
-st.sidebar.header("🔍 审计干预")
-manual_key = st.sidebar.text_input("手动关键词搜索", placeholder="如：市值管理")
+# 侧边栏
+st.sidebar.header("🔍 审计搜索")
+manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：回购")
 
-news_df = fetch_news_stable()
-sector_map = get_sector_stocks()
+# 全量早盘流 (默认加载)
+all_news = fetch_news_via_mirror("并购+回购+IPO")
 
-if not news_df.empty:
-    # --- 第一部分：板块深度穿透 ---
-    st.subheader("🏭 板块深度穿透")
-    selected_sector = st.selectbox("选择审计板块", list(SECTOR_CONFIG.keys()))
+# UI 第一部分：板块深度穿透
+st.subheader("🏭 板块深度穿透")
+selected_sector = st.selectbox("选择审计板块", list(SECTOR_CONFIG.keys()))
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.write(f"📊 **{selected_sector}** 不限流权重表现：")
+    stock_df = get_realtime_stocks(selected_sector)
+    if not stock_df.empty:
+        st.table(stock_df)
+    else:
+        st.info("数据接口同步中...")
+
+with col2:
+    st.write(f"📰 **{selected_sector}** 联动镜像新闻：")
+    # 获取该板块对应的搜索关键词
+    q = SECTOR_CONFIG[selected_sector]["keywords"]
+    sector_news = fetch_news_via_mirror(q)
     
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.write(f"📌 **{selected_sector}** 核心成分股：")
-        stocks = sector_map.get(selected_sector, [])
-        if stocks:
-            st.code("\n".join(stocks), language="text")
-        else:
-            st.warning("行情接口限流中")
+    if not sector_news.empty:
+        for _, row in sector_news.iterrows():
+            with st.expander(f"{row['title']}"):
+                st.caption(f"发布时间: {row['time']}")
+                st.markdown(f"[查看穿透原文]({row['link']})")
+    else:
+        st.warning(f"当前镜像流暂未发现与 {selected_sector} 相关的强特征线索。")
 
-    with c2:
-        # 核心改进：根据选中的板块，自动穿透相关新闻
-        st.write(f"📰 **{selected_sector}** 板块关联新闻：")
-        sector_related_news = filter_news_by_sector(news_df, selected_sector)
-        
-        if not sector_related_news.empty:
-            for _, row in sector_related_news.head(8).iterrows():
-                with st.expander(f"{row['title']}"):
-                    st.caption(f"发布时间: {row['time']}")
-                    st.markdown(f"[原文链接]({row['link']})")
-        else:
-            st.info(f"当前流中暂无与 {selected_sector} 强相关的线索")
+st.divider()
 
-    st.divider()
-
-    # --- 第二部分：全量审计流 ---
-    st.subheader("🔍 全量新闻审计流")
-    search_term = manual_key if manual_key else ""
-    display_news = news_df[news_df['title'].str.contains(search_term)] if search_term else news_df
-    
-    for _, row in display_news.head(15).iterrows():
-        with st.expander(f"{row['title']}"):
-            st.write(f"发布时间: {row['time']}")
-            st.markdown(f"[跳转原文]({row['link']})")
-            # 标记该新闻命中了哪些板块
-            hits = [name for name, cfg in SECTOR_CONFIG.items() if any(k in row['title'] for k in [name]+cfg['keywords'])]
-            if hits:
-                st.info(f"审计标记 - 关联板块: {', '.join(hits)}")
-
+# UI 第二部分：热词与全量流
+st.subheader("🔥 实时早盘审计流")
+if not all_news.empty:
+    for _, row in all_news.head(10).iterrows():
+        st.write(f"● {row['title']} (_{row['time']}_)")
 else:
-    st.error("无法建立安全连接。Nova，请检查本地代理或云端防火墙设置。")
+    st.error("无法建立安全连接，镜像流受限。")
 
 st.markdown("---")
-st.caption("Nova 审计逻辑：第一通过词簇模糊映射，次之下钻成分股，终于全球 RSS 隔离抓取。")
+st.caption("Nova 审计脚注：个股行情采用新浪 HTML 通道，新闻采用主动式关键词联动镜像。")
