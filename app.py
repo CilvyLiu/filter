@@ -1,227 +1,131 @@
 import streamlit as st
-import akshare as ak
+import requests
 import pandas as pd
+from collections import Counter
 from datetime import datetime
 
-# =====================================================
-# 1. 页面配置（必须第一行）
-# =====================================================
-st.set_page_config(
-    page_title="Nova 穿透式投研系统 · 板块版",
-    page_icon="🛡️",
-    layout="wide"
-)
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="2026政策热词 + 板块实时分析", layout="wide")
 
-# =====================================================
-# 2. 核心审计引擎（板块优先）
-# =====================================================
-class NovaAuditEngine:
-
-    # -------------------------------
-    # 政策 / 新闻信号模块
-    # -------------------------------
-    @staticmethod
-    @st.cache_data(ttl=600)
-    def fetch_smart_news():
-        """
-        获取政策新闻并计算关键词权重
-        """
-        try:
-            df = ak.stock_telegraph_cls()
-            if df.empty:
-                return pd.DataFrame()
-
-            df = df.rename(columns={
-                '标题': 'title',
-                '内容': 'content',
-                '发布时间': 'time'
+# =========================
+# 1️⃣ 数据抓取逻辑 (保持高效请求)
+# =========================
+@st.cache_data(ttl=300)
+def fetch_cls_news(limit=50):
+    try:
+        url = "https://www.cls.cn/nodeapi/telegraphs"
+        # 增加伪装头防止云端阻断
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=10).json()
+        items = res.get("data", {}).get("roll_data", []) # 注意财联社字段结构
+        if not items: items = res.get("data", [])
+        
+        records = []
+        for item in items[:limit]:
+            records.append({
+                "title": item.get("title", ""),
+                "content": item.get("content", ""),
+                "time": datetime.fromtimestamp(item.get("ctime", 0))
             })
+        return pd.DataFrame(records)
+    except Exception as e:
+        return pd.DataFrame()
 
-            key_words = [
-                '降准', '回购', '注销', '并购重组',
-                '新质生产力', '低空经济', '红利', '增持'
-            ]
+@st.cache_data(ttl=1800)
+def fetch_eastmoney_boards():
+    try:
+        url = ("https://push2.eastmoney.com/api/qt/clist/get?"
+               "pn=1&pz=200&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14,f3,f6")
+        res = requests.get(url, timeout=10).json()
+        data = res.get("data", {}).get("diff", [])
+        if not data: return pd.DataFrame()
+        df = pd.DataFrame(data).rename(columns={"f12": "code", "f14": "name", "f3": "change_pct", "f6": "amount"})
+        return df
+    except:
+        return pd.DataFrame()
 
-            def detect_keywords(text):
-                found = [w for w in key_words if w in str(text)]
-                return ", ".join(found) if found else None
-
-            df['signal'] = df['content'].apply(detect_keywords)
-            df = df.dropna(subset=['signal'])
-
-            if df.empty:
-                return pd.DataFrame()
-
-            df['weight'] = df['signal'].str.count(',') + 1
-            df = df.sort_values('weight', ascending=False)
-
-            return df
-
-        except Exception as e:
-            print(f"新闻取数失败: {e}")
-            return pd.DataFrame()
-
-    # -------------------------------
-    # 行业板块列表
-    # -------------------------------
-    @staticmethod
-    @st.cache_data(ttl=3600)
-    def get_industry_boards():
-        """
-        获取东方财富行业板块
-        """
-        try:
-            df = ak.stock_board_industry_name_em()
-            df = df.rename(columns={
-                '板块名称': 'industry',
-                '涨跌幅': 'change_pct',
-                '成交额': 'amount'
-            })
-
-            df['change_pct'] = pd.to_numeric(df['change_pct'], errors='coerce')
-            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-
-            return df.dropna()
-
-        except Exception as e:
-            print(f"板块取数失败: {e}")
-            return pd.DataFrame()
-
-    # -------------------------------
-    # 行业 → 个股穿透
-    # -------------------------------
-    @staticmethod
-    @st.cache_data(ttl=1800)
-    def get_industry_stocks(industry_name):
-        """
-        获取指定行业板块的成分股
-        """
-        try:
-            df = ak.stock_board_industry_cons_em(symbol=industry_name)
-            df = df.rename(columns={
-                '代码': 'code',
-                '名称': 'name',
-                '最新价': 'price',
-                '市盈率': 'pe',
-                '市净率': 'pb'
-            })
-
-            for col in ['price', 'pe', 'pb']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-            return df.dropna(subset=['pe', 'pb'])
-
-        except Exception as e:
-            print(f"板块穿透失败: {e}")
-            return pd.DataFrame()
-
-
-# =====================================================
-# 3. UI 渲染层
-# =====================================================
-def main():
-
-    st.title("🛡️ Nova 穿透式投研系统 · 行业板块版")
-    st.caption(
-        f"系统时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ "
-        f"路径：政策 → 板块 → 个股"
-    )
-
-    # -------------------------------
-    # 侧边栏（估值过滤）
-    # -------------------------------
-    st.sidebar.header("⚖️ 审计过滤条件")
-    max_pe = st.sidebar.slider("最大 PE", 5.0, 50.0, 20.0)
-    max_pb = st.sidebar.slider("最大 PB", 0.5, 5.0, 2.0)
-
-    # =================================================
-    # 第一部分：政策信号看板
-    # =================================================
-    st.subheader("🚩 高权重政策信号")
-
-    with st.spinner("正在解析最新政策信号..."):
-        news_df = NovaAuditEngine.fetch_smart_news()
+# =========================
+# 2️⃣ 逻辑改写：合并关键词侦测
+# =========================
+def analyze_with_custom_keywords(news_df, manual_keyword):
+    # 第一：预设专家级热词
+    expert_keywords = {
+        '回购注销': 5, '市值管理': 4, '新质生产力': 3, 
+        '特别国债': 5, '并购重组': 4, '低空经济': 3
+    }
+    
+    # 第二：合并手动输入关键词 (赋予最高权重)
+    if manual_keyword:
+        expert_keywords[manual_keyword] = 10 # 手动输入设为最高优先级
+    
+    def detect(text):
+        content = str(text)
+        found = [w for w in expert_keywords.keys() if w in content]
+        score = sum([expert_keywords[w] for w in found])
+        return score, ", ".join(found)
 
     if not news_df.empty:
-        for _, row in news_df.head(5).iterrows():
-            with st.expander(
-                f"强度 {row['weight']} ｜ {row['signal']} ｜ {row['time']}",
-                expanded=True
-            ):
-                st.write(row['content'])
+        res = news_df['content'].apply(detect)
+        news_df['weight'] = [x[0] for x in res]
+        news_df['signals'] = [x[1] for x in res]
+        return news_df[news_df['weight'] > 0].sort_values('weight', ascending=False)
+    return news_df
+
+# =========================
+# 3️⃣ UI 渲染层
+# =========================
+st.title("📊 2026政策热词 & 板块穿透系统")
+
+# 侧边栏：交互输入
+st.sidebar.header("🔍 手动干预逻辑")
+manual_key = st.sidebar.text_input("手动注入关键词 (实时合并搜索)", placeholder="如：固态电池")
+
+# 获取数据
+news_df = fetch_cls_news()
+boards_df = fetch_eastmoney_boards()
+
+# 第一部分：热词融合与搜索
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("🚩 政策权重看板 (自动热词 + 手动注入)")
+    processed_news = analyze_with_custom_keywords(news_df.copy(), manual_key)
+    
+    if not processed_news.empty:
+        for _, row in processed_news.head(10).iterrows():
+            # 突出显示手动搜索到的词
+            is_manual = manual_key and manual_key in row['signals']
+            box_type = st.error if is_manual else st.info
+            box_type(f"**【权重: {row['weight']} | 信号: {row['signals']}】** {row['time']}\n\n{row['content']}")
     else:
-        st.info("当前暂无高权重政策信号。")
+        st.info("当前暂无匹配的高权重信号。")
 
-    st.divider()
+with col2:
+    st.subheader("🏭 行业板块活跃度")
+    if not boards_df.empty:
+        # 按照成交额排序，撇掉无流动性的板块
+        top_boards = boards_df.sort_values('amount', ascending=False).head(15)
+        st.dataframe(top_boards[['name', 'change_pct']], hide_index=True)
+    else:
+        st.warning("板块数据获取受阻。")
 
-    # =================================================
-    # 第二部分：行业板块选择
-    # =================================================
-    st.subheader("🏭 行业板块扫描")
+# 第二部分：多源热词云提取
+st.divider()
+st.subheader("🔗 多源词频透视 (财联社 + 板块名)")
+if not news_df.empty:
+    all_text = " ".join(news_df['content'].astype(str)) + " ".join(boards_df['name'].astype(str))
+    # 简单的词频过滤逻辑
+    stop_words = ['关于', '进行', '已经', '目前', '通过', '发布']
+    words = [w for w in all_text.replace('\n','').split() if len(w) > 1 and w not in stop_words]
+    hot_counts = Counter(words).most_common(20)
+    
+    # 转换成 DataFrame 展示
+    hot_df = pd.DataFrame(hot_counts, columns=['热词', '频率'])
+    st.bar_chart(hot_df.set_index('热词'))
 
-    boards_df = NovaAuditEngine.get_industry_boards()
-
-    if boards_df.empty:
-        st.error("❌ 无法获取行业板块数据（云端 IP 可能受限）")
-        return
-
-    # 板块排序逻辑：成交额 + 涨跌幅
-    boards_df = boards_df.sort_values(
-        ['amount', 'change_pct'],
-        ascending=False
-    )
-
-    selected_board = st.selectbox(
-        "请选择一个行业板块进行穿透分析",
-        boards_df['industry'].head(20)
-    )
-
-    # =================================================
-    # 第三部分：板块内个股穿透
-    # =================================================
-    if selected_board:
-        st.subheader(f"🎯 {selected_board} 板块 · 低溢价标的")
-
-        with st.spinner("正在穿透板块成分股..."):
-            stocks_df = NovaAuditEngine.get_industry_stocks(selected_board)
-
-        if stocks_df.empty:
-            st.warning("该板块暂无可用成分股数据。")
-        else:
-            final_df = stocks_df[
-                (stocks_df['pe'] > 0) &
-                (stocks_df['pe'] <= max_pe) &
-                (stocks_df['pb'] <= max_pb)
-            ].sort_values('pe')
-
-            if final_df.empty:
-                st.info("该板块暂无符合安全边际的个股。")
-            else:
-                st.success(
-                    f"在 {selected_board} 板块中筛选出 "
-                    f"{len(final_df)} 只低溢价标的"
-                )
-                st.dataframe(
-                    final_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-    # =================================================
-    # 底部说明
-    # =================================================
-    st.divider()
-    st.markdown(
-        """
-        <div style="text-align:center; font-size:0.8em; color:gray;">
-        Nova 方法论：<br>
-        政策信号 → 行业板块 → 板块内估值穿透<br>
-        本系统仅用于投研辅助，不构成投资建议
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-if __name__ == "__main__":
-    main()
+st.markdown("""
+<div style='text-align:center; color:gray; font-size:0.8em;'>
+系统逻辑：[手动关键词优先级10] + [专家关键词优先级3-5] -> 权重加权排序<br>
+Nova，当前模式已撇掉表面溢价，直击政策核心。
+</div>
+""", unsafe_allow_html=True)
