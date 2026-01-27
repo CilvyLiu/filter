@@ -1,38 +1,32 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
 from collections import Counter
-from xml.etree import ElementTree
+from datetime import datetime
+import yfinance as yf
 
-# --- 1. 页面配置 ---
-st.set_page_config(page_title="Nova A股新闻板块看板 (云端隔离版)", layout="wide")
-st.title("🛡️ Nova A股投行+行业新闻看板")
-st.caption(f"系统运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 状态: 云端通畅模式")
+# -----------------------------
+# 1️⃣ 页面配置
+# -----------------------------
+st.set_page_config(
+    page_title="投行级早盘新闻板块穿透 (热词板块版)",
+    page_icon="🛡️",
+    layout="wide"
+)
+st.title("🛡️ 投行级早盘新闻板块穿透系统")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- 2. 核心字典 (Nova 专家逻辑) ---
-KEY_WEIGHTS = {
-    '回购':5,'增持':5,'并购':4,'IPO':4,'限售解禁':4,'分红':3,'降准':3,'注册制':3,'融资融券':2,
-    '化工':4,'原材料':4,'新能源':4,'医药':4,'科技':4,'地产':3,'能源':4,'钢铁':3,'电池':3,'光伏':3
-}
-
-KEYWORD_TO_SECTOR = {
-    '新能源':'新能源概念','化工':'化工行业','原材料':'材料行业','医药':'医药行业',
-    '科技':'半导体行业','地产':'房地产','能源':'能源行业','钢铁':'钢铁行业',
-    '电池':'新能源概念','光伏':'新能源概念','回购':'综合/红利','增持':'综合/红利','并购':'综合/重组','IPO':'综合/次新'
-}
-
-# --- 3. 新闻抓取 (不封IP模式) ---
-@st.cache_data(ttl=600)
-def fetch_news(limit=30):
+# -----------------------------
+# 2️⃣ 新闻抓取（Google RSS）
+# -----------------------------
+@st.cache_data(ttl=300)
+def fetch_news_rss():
     try:
-        # 使用 Google News RSS，这是云端部署最稳定的方案
-        url = "https://news.google.com/rss/search?q=A股+并购+回购+IPO+化工+医药+新能源&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
-        root = ElementTree.fromstring(res.content)
+        url = "https://news.google.com/rss/search?q=A股+并购+回购+新能源+化工+原材料+医药+AI+元宇宙+光伏&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        res = requests.get(url, timeout=10)
+        root = pd.ElementTree.fromstring(res.content)
         records = []
-        for item in root.findall('.//item')[:limit]:
+        for item in root.findall('.//item')[:50]:
             records.append({
                 "title": item.find('title').text,
                 "link": item.find('link').text,
@@ -43,75 +37,140 @@ def fetch_news(limit=30):
     except:
         return pd.DataFrame()
 
-# --- 4. 专家权重算法 ---
-def extract_hotwords(df, manual_key=None):
-    weights = KEY_WEIGHTS.copy()
-    if manual_key:
-        weights[manual_key] = 10  # 手动注入词拥有最高穿透力
-
+# -----------------------------
+# 3️⃣ 热词提取
+# -----------------------------
+def extract_hotwords(df, top_n=20):
     counter = Counter()
     for text in df['content']:
-        text_str = str(text)
-        for k, w in weights.items():
-            if k in text_str:
-                counter[k] += w
-    
-    res_df = pd.DataFrame(counter.most_common(20), columns=["word", "count"])
-    res_df['板块'] = res_df['word'].map(lambda x: KEYWORD_TO_SECTOR.get(x, '其他/宏观'))
-    return res_df
+        words = [w for w in str(text).split() if len(w) > 1]
+        counter.update(words)
+    hotwords = counter.most_common(top_n)
+    return pd.DataFrame(hotwords, columns=["word", "count"])
 
-# --- 5. 跨境行情联动 (云端保底方案) ---
-@st.cache_data(ttl=1800)
-def get_cloud_行情(sector_name):
-    """
-    当国内接口在云端受阻时，抓取对应的 A50 或中概 ETF 作为行情锚点。
-    """
-    # 模拟真实穿透：如果是新能源，展示对应主要标的
-    mock_market = {
-        "代码": ["ASHR (A股ETF)", "MCHI (中国ETF)", "FXI (大盘ETF)"],
-        "参考名称": ["沪深300锚点", "MSCI中国锚点", "富时A50锚点"],
-        "最新价": ["31.50", "42.80", "26.10"],
-        "状态": ["实时联动中", "实时联动中", "实时联动中"]
+# -----------------------------
+# 4️⃣ 板块成分股抓取 (东方财富)
+# -----------------------------
+@st.cache_data(ttl=3600)
+def get_sector_stocks():
+    sector_codes = {
+        "新能源": "BK0998", # 电力设备
+        "化工": "BK0436",   # 基础化工
+        "原材料": "BK0486", # 建筑材料
+        "医药": "BK0506",   # 医药生物
+        "综合/重组": "BK0110", # 股权转让
+        "光伏": "BK0933",   # 光伏设备
+        "AI": "BK1096",     # 2026 修正：人工智能核心
+        "元宇宙": "BK1009", # 2026 修正：虚拟现实/元宇宙
+        "低空经济": "BK1158", # 2026 政策核心
+        "科技": "BK0707",   # 半导体
+        "地产": "BK0451"    # 房地产
     }
-    return pd.DataFrame(mock_market)
+    sector_data = {}
+    for name, code in sector_codes.items():
+        try:
+            url = f"http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&fltt=2&invt=2&fs=b:{code}&fields=f12,f14"
+            res = requests.get(url, timeout=10).json()
+            stocks = []
+            for item in res.get('data', {}).get('diff', []):
+                stocks.append(f"{item['f14']}({item['f12']})")
+            sector_data[name] = stocks
+        except:
+            sector_data[name] = []
+    return sector_data
 
-# --- 6. UI 渲染层 ---
-st.sidebar.header("🔍 Nova 审计输入")
-manual_key = st.sidebar.text_input("手动关键词", placeholder="注入后权重置顶")
+# -----------------------------
+# 5️⃣ 新闻 → 板块映射
+# -----------------------------
+def map_news_to_sector(news_df, sector_map):
+    news_df['板块'] = ""
+    news_df['相关股票'] = ""
+    for idx, row in news_df.iterrows():
+        sectors_hit = []
+        stocks_hit = []
+        for sector, tickers in sector_map.items():
+            for keyword in [sector, "并购", "回购", "IPO", "增持"]:
+                if keyword in row['content']:
+                    sectors_hit.append(sector)
+                    stocks_hit.extend(tickers)
+                    break
+        news_df.at[idx, '板块'] = ", ".join(list(set(sectors_hit)))
+        news_df.at[idx, '相关股票'] = ", ".join(list(set(stocks_hit)))
+    return news_df
 
-news_df = fetch_news()
+# -----------------------------
+# 6️⃣ 股票最新价
+# -----------------------------
+@st.cache_data(ttl=300)
+def get_stock_prices(stock_list):
+    data = []
+    for s in stock_list:
+        try:
+            if '(' in s:
+                code = s.split('(')[1].replace(')','')
+                t = yf.Ticker(code + ".SS") if code.startswith('6') else yf.Ticker(code + ".SZ")
+                info = t.fast_info
+                data.append({"股票": s, "最新价": round(info['last_price'],2)})
+            else:
+                data.append({"股票": s, "最新价": None})
+        except:
+            data.append({"股票": s, "最新价": None})
+    return pd.DataFrame(data)
 
-if news_df.empty:
-    st.warning("⚠️ 数据源连接异常。Nova，若在云端运行，请确认 GitHub 仓库已配置正确。")
+# =========================
+# 7️⃣ Streamlit UI
+# =========================
+news_df = fetch_news_rss()
+sector_map = get_sector_stocks()
+news_df = map_news_to_sector(news_df, sector_map)
+
+# -------------------------
+# 7a. 热词排行榜
+# -------------------------
+st.subheader("🔥 热词排行榜")
+if not news_df.empty:
+    hotwords_df = extract_hotwords(news_df)
+    st.dataframe(hotwords_df, use_container_width=True)
 else:
-    # 热词榜
-    st.subheader("🔥 实时热度权重看板")
-    hotwords_df = extract_hotwords(news_df, manual_key)
-    st.dataframe(hotwords_df, use_container_width=True, hide_index=True)
+    st.warning("暂无新闻可提取热词")
 
-    # 左右布局
-    col1, col2 = st.columns([3, 2])
+# -------------------------
+# 7b. 板块新闻
+# -------------------------
+st.subheader("🏭 板块新闻穿透")
+sector_list = list(sector_map.keys())
+selected_sector = st.selectbox("选择板块查看新闻", sector_list)
+sector_news = news_df[news_df['板块'].str.contains(selected_sector)]
+if not sector_news.empty:
+    for _, row in sector_news.iterrows():
+        with st.expander(f"{row['title']} | {row['time']}"):
+            st.write(row['content'])
+            st.write(f"📌 相关股票: {row['相关股票']}")
+else:
+    st.info(f"{selected_sector}板块暂无新闻")
 
-    with col1:
-        st.subheader("📰 最新投行与政策快讯")
-        for _, row in news_df.head(10).iterrows():
-            with st.expander(f"{row['title']}", expanded=False):
-                st.write(f"时间: {row['time']}")
-                st.markdown(f"[点击阅读原文]({row['link']})")
-    
-    with col2:
-        st.subheader("🏭 行业定价穿透")
-        target_sector = st.selectbox("选择热点行业", hotwords_df['板块'].unique())
-        if target_sector:
-            st.info(f"当前正在通过海外定价锚点穿透: {target_sector}")
-            stocks_df = get_cloud_行情(target_sector)
-            st.table(stocks_df)
+# -------------------------
+# 7c. 手动关键词搜索
+# -------------------------
+st.subheader("🔍 手动关键词搜索")
+manual_key = st.text_input("输入关键词搜索新闻")
+if manual_key:
+    manual_news = news_df[news_df['content'].str.contains(manual_key, na=False)]
+    if not manual_news.empty:
+        for _, row in manual_news.iterrows():
+            with st.expander(f"{row['title']} | {row['time']}"):
+                st.write(row['content'])
+                st.write(f"📌 相关股票: {row['相关股票']}")
+    else:
+        st.info("暂无匹配新闻")
 
-# --- 脚注 ---
-st.divider()
-st.markdown("""
-<div style='text-align:center; color:gray; font-size:0.8em;'>
-<b>Nova 投研审计逻辑</b>：1.RSS全球隔离取数 -> 2.专家热词权重过滤 -> 3.跨域行业行情映射<br>
-本系统已针对 Streamlit Cloud 环境进行 IP 容错优化。
-</div>
-""", unsafe_allow_html=True)
+# -------------------------
+# 7d. 股票最新价格
+# -------------------------
+st.subheader("📊 板块相关股票最新价格")
+all_stocks = list({s for s_list in news_df['相关股票'] for s in s_list.split(',') if s})
+if all_stocks:
+    prices_df = get_stock_prices(all_stocks)
+    st.table(prices_df)
+else:
+    st.info("暂无新闻涉及的股票")
