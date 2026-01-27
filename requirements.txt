@@ -1,7 +1,4 @@
-streamlit
-akshare
-pandas
-requests
-lxml
-numpy
-yfinance
+streamlit>=1.24
+pandas>=1.5
+requests>=2.31
+yfinance>=0.2.25
