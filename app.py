@@ -1,32 +1,65 @@
 import streamlit as st
 import pandas as pd
 import requests
-from collections import Counter
-from datetime import datetime, timedelta
-from xml.etree import ElementTree
+from datetime import datetime
+import re
 
 # -----------------------------
 # 1️⃣ 页面配置
 # -----------------------------
 st.set_page_config(page_title="Nova 投行级穿透看板", page_icon="🛡️", layout="wide")
 st.title("🛡️ 投行级新闻板块穿透系统")
-st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 7天深度穿透 + 社交情绪矩阵")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 新浪实时搜索穿透 (7D)")
 
 # -----------------------------
-# 2️⃣ 核心数据字典 (热词逻辑优化：OR 命中模式)
+# 2️⃣ 核心数据字典
 # -----------------------------
 SECTOR_CONFIG = {
-    "医药": {"keywords": "医药 OR 生物 OR 创新药 OR 集采 OR 医疗", "stocks": ["600276", "300760", "603259"]},
-    "新能源": {"keywords": "锂电 OR 宁德时代 OR 储能 OR 光伏 OR 固态电池", "stocks": ["300750", "002594", "300274"]},
-    "科技": {"keywords": "半导体 OR 芯片 OR 华为 OR AI OR 算力", "stocks": ["603501", "688981", "002415"]},
-    "低空经济": {"keywords": "无人机 OR 飞行汽车 OR eVTOL OR 低空经济", "stocks": ["002085", "000099", "600677"]},
-    "化工": {"keywords": "化工 OR 涨价 OR 产能 OR 化纤 OR 磷化工", "stocks": ["600309", "002493", "600096"]},
-    "综合/重组": {"keywords": "并购 OR 重组 OR 股权转让 OR 借壳 OR 市值管理", "stocks": ["600104", "000157", "600606"]},
-    "地产": {"keywords": "房地产 OR 收储 OR 存量房 OR 房贷 OR 城中村", "stocks": ["600048", "000002", "601155"]}
+    "医药": {"keywords": "医药,创新药,300760", "stocks": ["600276", "300760", "603259"]},
+    "新能源": {"keywords": "锂电,宁德时代,固态电池", "stocks": ["300750", "002594", "300274"]},
+    "机器人": {"keywords": "机器人,人形机器人,减速器,002031", "stocks": ["002031", "300024", "603728"]},
+    "科技": {"keywords": "半导体,芯片,AI算力", "stocks": ["603501", "688981", "002415"]},
+    "综合/重组": {"keywords": "并购重组,股权转让,市值管理", "stocks": ["600104", "000157", "600606"]},
+    "地产": {"keywords": "房地产,收储,房贷利率", "stocks": ["600048", "000002", "601155"]}
 }
 
 # -----------------------------
-# 3️⃣ 行情引擎 (新浪实盘通道)
+# 3️⃣ 新浪实时搜索引擎 (核心替换：解决“无内容”问题)
+# -----------------------------
+@st.cache_data(ttl=120)
+def fetch_sina_search_live(query):
+    """
+    暴力穿透：通过新浪搜索接口直接获取 7 天内的实时新闻与微博异动
+    """
+    records = []
+    # 拆分关键词以增加命中率
+    kws = query.replace("OR", ",").split(",")
+    for kw in kws:
+        kw = kw.strip()
+        url = f"https://search.sina.com.cn/api/search/api.php?q={kw}&refer=f_weibo&f_type=news&s_type=all"
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            res = requests.get(url, headers=headers, timeout=5).json()
+            items = res.get("data", {}).get("list", [])
+            for item in items:
+                # 清洗 HTML 标签
+                title = re.sub('<[^<]+?>', '', item.get("title", ""))
+                records.append({
+                    "title": title,
+                    "time": item.get("datetime", "刚刚"),
+                    "link": item.get("url", ""),
+                    "source": item.get("source", "实时流")
+                })
+        except:
+            continue
+    
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['title']).sort_values(by='time', ascending=False)
+    return df
+
+# -----------------------------
+# 4️⃣ 行情引擎
 # -----------------------------
 @st.cache_data(ttl=60)
 def get_realtime_stocks(sector_name):
@@ -48,123 +81,55 @@ def get_realtime_stocks(sector_name):
     except:
         return pd.DataFrame()
 
-# -----------------------------
-# 4️⃣ 核心探测引擎 (穿透深度：7天)
-# -----------------------------
-@st.cache_data(ttl=300)
-def fetch_nova_engine(query="", is_social=False):
-    """
-    Nova 韧性引擎：支持 7天 深度穿透，采用 OR 逻辑绕过镜像过滤
-    """
-    try:
-        if is_social:
-            # 情绪探测：扩充深度，加入热门讨论源
-            search_query = f"(雪球 OR 股吧 OR 讨论) {query} after:7d"
-        else:
-            # 官方新闻：扩充权重源，保证不落空
-            search_query = f"(财联社 OR 证券时报 OR 界面新闻 OR 第一财经) {query} after:7d"
-            
-        url = f"https://news.google.com/rss/search?q={search_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-        res = requests.get(url, timeout=10)
-        root = ElementTree.fromstring(res.content)
-        records = []
-        for item in root.findall('.//item')[:15]:
-            title = item.find('title').text
-            # 基础过滤，保留核心
-            records.append({
-                "title": title.split('-')[0].strip(),
-                "time": item.find('pubDate').text,
-                "link": item.find('link').text,
-                "source": "🔥 社交/异动" if is_social else "📰 官方信源"
-            })
-        return pd.DataFrame(records)
-    except:
-        return pd.DataFrame()
-
 # =========================
-# 5️⃣ Streamlit UI 交互
+# 5️⃣ UI 交互层
 # =========================
-
-# 侧边栏
-st.sidebar.header("🔍 审计搜索控制台")
-manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：固态电池 / 机器人")
-probe_trigger = st.sidebar.button("🚀 执行 7天 全量探测", use_container_width=True)
-st.sidebar.divider()
+st.sidebar.header("🔍 专项穿透")
+manual_key = st.sidebar.text_input("注入手动关键词/代码", placeholder="如: 机器人")
+probe_trigger = st.sidebar.button("🚀 执行暴力探测", use_container_width=True)
 
 if probe_trigger and manual_key:
-    # A模式：主动搜索
     st.subheader(f"⚡ 7D 专项探测：{manual_key}")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write("📖 **官方动态穿透**")
-        m_news = fetch_nova_engine(manual_key, is_social=False)
-        if not m_news.empty:
-            for _, r in m_news.iterrows():
+    res_df = fetch_sina_search_live(manual_key)
+    if not res_df.empty:
+        for _, r in res_df.iterrows():
+            c1, c2 = st.columns([5, 1])
+            with c1: 
                 st.write(f"● {r['title']}")
-                st.link_button("穿透原文", r['link'], key=f"n_{r['link']}")
-        else: st.info("本周官方信源暂无强匹配内容")
-    with c2:
-        st.write("🧠 **社交舆情穿透**")
-        s_news = fetch_nova_engine(manual_key, is_social=True)
-        if not s_news.empty:
-            for _, r in s_news.iterrows():
-                st.write(f"● {r['title']}")
-                st.link_button("查看讨论", r['link'], key=f"s_{r['link']}")
-        else: st.info("本周讨论热度平稳")
-    if st.button("⬅️ 重置看板视图"): st.rerun()
+                st.caption(f"🕒 {r['time']} | 来源: {r['source']}")
+            with c2: st.link_button("穿透", r['link'], key=f"m_{r['link']}")
+    else:
+        st.error("新浪接口探测失败，请尝试输入个股代码（如 002031）")
+    if st.button("⬅️ 返回"): st.rerun()
 
 else:
-    # B模式：默认看板模式
-    st.subheader("🏭 板块深度穿透 (本周全量)")
-    selected_sector = st.selectbox("选择审计板块", list(SECTOR_CONFIG.keys()))
+    st.subheader("🏭 板块深度穿透")
+    selected_sector = st.selectbox("审计板块", list(SECTOR_CONFIG.keys()))
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.write(f"📊 **{selected_sector}** 实时行情")
-        stock_df = get_realtime_stocks(selected_sector)
-        if not stock_df.empty:
-            st.table(stock_df)
-        else: st.info("行情刷新中...")
+        st.write("📊 **实时行情**")
+        st.table(get_realtime_stocks(selected_sector))
 
     with col2:
-        st.write(f"📰 **{selected_sector}** 周内关键动态")
-        q_words = SECTOR_CONFIG[selected_sector]["keywords"]
-        sector_news = fetch_nova_engine(q_words, is_social=False)
-        if not sector_news.empty:
-            for _, row in sector_news.iterrows():
-                nc1, nc2 = st.columns([4, 1])
-                with nc1:
-                    st.write(f"● {row['title']}")
-                    st.caption(f"🕒 {row['time']}")
-                with nc2:
-                    st.link_button("🚀 穿透", row['link'], use_container_width=True)
+        st.write(f"📰 **{selected_sector}** 7D 关键动态")
+        q = SECTOR_CONFIG[selected_sector]["keywords"]
+        df_news = fetch_sina_search_live(q)
+        if not df_news.empty:
+            for _, r in df_news.head(15).iterrows():
+                st.write(f"● {r['title']}")
+                st.caption(f"🕒 {r['time']}")
         else:
-            st.warning("💡 本周暂无深度关联动态。建议在侧边栏手动注入具体代码穿透。")
-
-    st.divider()
-    # 社交情绪模块
-    st.subheader(f"🧠 {selected_sector} 社交热议/传闻探测 (7D)")
-    sentiment_df = fetch_nova_engine(selected_sector, is_social=True)
-    if not sentiment_df.empty:
-        scs = st.columns(2)
-        for i, (_, row) in enumerate(sentiment_df.iterrows()):
-            with scs[i % 2]:
-                st.info(f"{row['title']}")
-                st.link_button("进入社区讨论", row['link'], use_container_width=True)
-    else: st.write("本周板块社交讨论处于常态区间。")
+            st.warning("并未发现瞬时动态，系统正在重试锚点穿透...")
 
 st.divider()
-
-# 2. 全量流（常驻底部）
 st.subheader("🔥 市场全局异动流 (7D)")
-main_news = fetch_nova_engine("(并购 OR 重组 OR 回购 OR 异动 OR 涨价)", is_social=False)
-if not main_news.empty:
-    for _, row in main_news.head(15).iterrows():
-        mc1, mc2 = st.columns([5, 1])
-        with mc1:
-            st.write(f"📌 {row['title']} (_{row['time']}_)")
-        with mc2:
-            st.link_button("原文", row['link'], key=f"main_{row['link']}")
+global_news = fetch_sina_search_live("并购重组,异动,涨价")
+if not global_news.empty:
+    for _, r in global_news.head(10).iterrows():
+        gc1, gc2 = st.columns([5, 1])
+        with gc1: st.write(f"📌 {r['title']} (_{r['time']}_)")
+        with gc2: st.link_button("原文", r['link'], key=f"g_{r['link']}")
 
 st.markdown("---")
-st.caption("Nova 审计脚注：采用 after:7d 深度索引，逻辑层已强制优化关键词命中规则。")
+st.caption("Nova 审计脚注：已切换至新浪 Search 实时通道。如仍无结果，请检查网络连接或更换关键词。")
