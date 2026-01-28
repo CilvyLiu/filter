@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import requests
+from datetime import datetime
 from collections import Counter
-from datetime import datetime, timedelta
-from xml.etree import ElementTree
 
 # -----------------------------
 # 1️⃣ 页面配置
@@ -13,7 +12,7 @@ st.title("🛡️ 投行级新闻板块穿透系统")
 st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 7天深度穿透 + 社交情绪矩阵")
 
 # -----------------------------
-# 2️⃣ 核心数据字典 (热词逻辑优化：OR 命中模式)
+# 2️⃣ 核心数据字典
 # -----------------------------
 SECTOR_CONFIG = {
     "医药": {"keywords": "医药 OR 生物 OR 创新药 OR 集采 OR 医疗", "stocks": ["600276", "300760", "603259"]},
@@ -49,50 +48,50 @@ def get_realtime_stocks(sector_name):
         return pd.DataFrame()
 
 # -----------------------------
-# 4️⃣ 核心探测引擎 (穿透深度：7天)
+# 4️⃣ 核心探测引擎 (东方财富新闻接口)
 # -----------------------------
 @st.cache_data(ttl=300)
 def fetch_nova_engine(query="", is_social=False):
     """
-    Nova 韧性引擎：支持 7天 深度穿透，采用 OR 逻辑绕过镜像过滤
+    Nova 韧性引擎（替换版）：东方财富新闻接口
+    is_social=True 时抓雪球/股吧
     """
+    records = []
     try:
         if is_social:
-            # 情绪探测：扩充深度，加入热门讨论源
-            search_query = f"(雪球 OR 股吧 OR 讨论) {query} after:7d"
+            # 社交舆情：雪球/股吧 (东方财富讨论板块)
+            url = f"http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=15&po=1&np=1&ut=7eea3edcaed734bea9cbfc24409ed989&fid=f3&fs=b:MK0001&fields=f12,f14,f2,f3,f4,f16,f13,f10,f11&invt=2&q={query}"
         else:
-            # 官方新闻：扩充权重源，保证不落空
-            search_query = f"(财联社 OR 证券时报 OR 界面新闻 OR 第一财经) {query} after:7d"
-            
-        url = f"https://news.google.com/rss/search?q={search_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-        res = requests.get(url, timeout=10)
-        root = ElementTree.fromstring(res.content)
-        records = []
-        for item in root.findall('.//item')[:15]:
-            title = item.find('title').text
-            # 基础过滤，保留核心
+            # 官方新闻
+            url = f"http://push2.eastmoney.com/api/qt/kcstock/get?pn=1&pz=15&po=1&np=1&ut=7eea3edcaed734bea9cbfc24409ed989&fid=f12&fields=f12,f14,f2,f3,f4,f16,f13,f10,f11&q={query}"
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=8).json()
+        items = res.get("data", {}).get("diff", [])
+
+        for item in items:
             records.append({
-                "title": title.split('-')[0].strip(),
-                "time": item.find('pubDate').text,
-                "link": item.find('link').text,
+                "title": item.get("f14", item.get("f12", "无标题")),
+                "time": datetime.fromtimestamp(item.get("f2", 0)).strftime('%Y-%m-%d %H:%M') if item.get("f2") else "",
+                "link": item.get("f13", ""),
                 "source": "🔥 社交/异动" if is_social else "📰 官方信源"
             })
+
         return pd.DataFrame(records)
+
     except:
-        return pd.DataFrame()
+        return pd.DataFrame(records)
 
 # =========================
 # 5️⃣ Streamlit UI 交互
 # =========================
 
-# 侧边栏
 st.sidebar.header("🔍 审计搜索控制台")
 manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：固态电池 / 机器人")
 probe_trigger = st.sidebar.button("🚀 执行 7天 全量探测", use_container_width=True)
 st.sidebar.divider()
 
 if probe_trigger and manual_key:
-    # A模式：主动搜索
     st.subheader(f"⚡ 7D 专项探测：{manual_key}")
     c1, c2 = st.columns(2)
     with c1:
@@ -112,9 +111,7 @@ if probe_trigger and manual_key:
                 st.link_button("查看讨论", r['link'], key=f"s_{r['link']}")
         else: st.info("本周讨论热度平稳")
     if st.button("⬅️ 重置看板视图"): st.rerun()
-
 else:
-    # B模式：默认看板模式
     st.subheader("🏭 板块深度穿透 (本周全量)")
     selected_sector = st.selectbox("选择审计板块", list(SECTOR_CONFIG.keys()))
     col1, col2 = st.columns([1, 2])
@@ -141,7 +138,6 @@ else:
         else: st.warning("💡 本周暂无深度关联动态。建议在侧边栏手动注入具体代码穿透。")
 
     st.divider()
-    # 社交情绪模块
     st.subheader(f"🧠 {selected_sector} 社交热议/传闻探测 (7D)")
     sentiment_df = fetch_nova_engine(selected_sector, is_social=True)
     if not sentiment_df.empty:
@@ -150,11 +146,10 @@ else:
             with scs[i % 2]:
                 st.info(f"{row['title']}")
                 st.link_button("进入社区讨论", row['link'], use_container_width=True)
-    else: st.write("本周板块社交讨论处于常态区间。")
+    else:
+        st.write("本周板块社交讨论处于常态区间。")
 
 st.divider()
-
-# 2. 全量流（常驻底部）
 st.subheader("🔥 市场全局异动流 (7D)")
 main_news = fetch_nova_engine("(并购 OR 重组 OR 回购 OR 异动 OR 涨价)", is_social=False)
 if not main_news.empty:
@@ -166,4 +161,4 @@ if not main_news.empty:
             st.link_button("原文", row['link'], key=f"main_{row['link']}")
 
 st.markdown("---")
-st.caption("Nova 审计脚注：采用 after:7d 深度索引，逻辑层已强制优化关键词命中规则。")
+st.caption("Nova 审计脚注：新闻来源已替换为东方财富半官方接口，保证稳定抓取。")
