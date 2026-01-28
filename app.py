@@ -4,25 +4,26 @@ import requests
 from datetime import datetime, timedelta
 from xml.etree import ElementTree
 from email.utils import parsedate_to_datetime
+import urllib.parse
 
 # -----------------------------
 # 1️⃣ 页面配置
 # -----------------------------
 st.set_page_config(page_title="Nova 投行级穿透看板", page_icon="🛡️", layout="wide")
 st.title("🛡️ 投行级新闻板块穿透系统")
-st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 自动穿透板块关键词（国内免费）")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 自动穿透板块关键词（中英文 Google News）")
 
 # -----------------------------
 # 2️⃣ 核心数据字典
 # -----------------------------
 SECTOR_CONFIG = {
-    "医药": {"keywords": ["医药", "生物", "创新药", "集采"], "stocks": ["600276", "300760", "603259"]},
-    "新能源": {"keywords": ["锂电", "宁德时代", "储能", "光伏"], "stocks": ["300750", "002594", "300274"]},
-    "科技": {"keywords": ["半导体", "芯片", "华为", "AI"], "stocks": ["603501", "688981", "002415"]},
-    "低空经济": {"keywords": ["无人机", "飞行汽车", "eVTOL"], "stocks": ["002085", "000099", "600677"]},
-    "化工": {"keywords": ["化工", "涨价", "材料", "产能"], "stocks": ["600309", "002493", "600096"]},
-    "综合/重组": {"keywords": ["并购", "重组", "股权转让"], "stocks": ["600104", "000157", "600606"]},
-    "地产": {"keywords": ["房地产", "收储", "存量房", "房贷"], "stocks": ["600048", "000002", "601155"]}
+    "医药": {"keywords": ["医药", "生物", "创新药", "集采", "pharma", "biotech", "drug"], "stocks": ["600276", "300760", "603259"]},
+    "新能源": {"keywords": ["锂电", "宁德时代", "储能", "光伏", "lithium", "battery", "solar"], "stocks": ["300750", "002594", "300274"]},
+    "科技": {"keywords": ["半导体", "芯片", "华为", "AI", "semiconductor", "chip", "Huawei", "artificial intelligence"], "stocks": ["603501", "688981", "002415"]},
+    "低空经济": {"keywords": ["无人机", "飞行汽车", "eVTOL", "drone", "flying car"], "stocks": ["002085", "000099", "600677"]},
+    "化工": {"keywords": ["化工", "涨价", "材料", "产能", "chemical", "materials"], "stocks": ["600309", "002493", "600096"]},
+    "综合/重组": {"keywords": ["并购", "重组", "股权转让", "merger", "acquisition", "restructuring"], "stocks": ["600104", "000157", "600606"]},
+    "地产": {"keywords": ["房地产", "收储", "存量房", "房贷", "real estate", "housing"], "stocks": ["600048", "000002", "601155"]}
 }
 
 # -----------------------------
@@ -53,13 +54,14 @@ def get_realtime_stocks_sina(sector_name):
         return pd.DataFrame()
 
 # -----------------------------
-# 4️⃣ 国内新闻抓取（新浪 RSS）
+# 4️⃣ Google News RSS 抓取（支持中英文）
 # -----------------------------
 @st.cache_data(ttl=300)
-def fetch_news_cn(keywords, days=7):
+def fetch_news_google(keywords, days=7):
     records = []
     for kw in keywords:
-        rss_url = f"http://search.sina.com.cn/?q={kw}&c=news&sort=time&range=all&col=&source=&time=&from=channel&num=50&dpc=0&format=rss"
+        query = urllib.parse.quote(kw)
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
         try:
             res = requests.get(rss_url, timeout=10)
             root = ElementTree.fromstring(res.content)
@@ -69,7 +71,7 @@ def fetch_news_cn(keywords, days=7):
                 pub_date = item.find('pubDate')
                 if pub_date is not None:
                     try:
-                        pub_dt = datetime.strptime(pub_date.text, "%a, %d %b %Y %H:%M:%S %Z")
+                        pub_dt = parsedate_to_datetime(pub_date.text)
                     except:
                         pub_dt = datetime.utcnow()
                 else:
@@ -88,7 +90,7 @@ def fetch_news_cn(keywords, days=7):
 # 5️⃣ Streamlit UI
 # =========================
 st.sidebar.header("🔍 审计搜索控制台")
-manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：市值管理 / 固态电池")
+manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：市值管理 / solid state battery")
 probe_trigger = st.sidebar.button("🚀 执行穿透探测", use_container_width=True)
 st.sidebar.divider()
 
@@ -96,7 +98,7 @@ st.sidebar.divider()
 if probe_trigger and manual_key:
     st.subheader(f"🚀 专项搜索：{manual_key}")
     with st.spinner(f"正在抓取 '{manual_key}' 相关线索..."):
-        manual_news = fetch_news_cn([manual_key])
+        manual_news = fetch_news_google([manual_key])
     if not manual_news.empty:
         for _, row in manual_news.iterrows():
             c1, c2 = st.columns([5, 1])
@@ -125,7 +127,7 @@ with col1:
 
 with col2:
     st.write(f"📰 **{selected_sector}** 板块关联动态：")
-    sector_news = fetch_news_cn(SECTOR_CONFIG[selected_sector]["keywords"])
+    sector_news = fetch_news_google(SECTOR_CONFIG[selected_sector]["keywords"])
     if not sector_news.empty:
         for _, row in sector_news.iterrows():
             nc1, nc2 = st.columns([4, 1])
@@ -141,7 +143,7 @@ st.divider()
 
 # 全量流
 st.subheader("🔥 实时早盘全量流")
-all_news = fetch_news_cn([kw for sector in SECTOR_CONFIG.values() for kw in sector["keywords"]])
+all_news = fetch_news_google([kw for sector in SECTOR_CONFIG.values() for kw in sector["keywords"]])
 if not all_news.empty:
     for _, row in all_news.head(10).iterrows():
         mc1, mc2 = st.columns([5, 1])
@@ -153,4 +155,4 @@ else:
     st.error("数据流受阻或近期无新新闻。")
 
 st.markdown("---")
-st.caption("Nova 审计脚注：新闻自动提取板块关键词（国内免费来源），最近7天内，已去重并按时间排序。")
+st.caption("Nova 审计脚注：新闻自动提取板块关键词（中英文 Google News），最近7天内，已去重并按时间排序。")
