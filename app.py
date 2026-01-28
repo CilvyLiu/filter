@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from xml.etree import ElementTree
 
 # -----------------------------
@@ -21,7 +20,7 @@ SECTOR_CONFIG = {
     "科技": {"keywords": "半导体+芯片+华为+AI", "stocks": ["603501", "688981", "002415"]},
     "低空经济": {"keywords": "无人机+飞行汽车+eVTOL", "stocks": ["002085", "000099", "600677"]},
     "化工": {"keywords": "化工+涨价+材料+产能", "stocks": ["600309", "002493", "600096"]},
-    "综合/重组": {"keywords": "并购+重组+重组+股权转让", "stocks": ["600104", "000157", "600606"]},
+    "综合/重组": {"keywords": "并购+重组+股权转让", "stocks": ["600104", "000157", "600606"]},
     "地产": {"keywords": "房地产+收储+存量房+房贷", "stocks": ["600048", "000002", "601155"]}
 }
 
@@ -49,42 +48,46 @@ def get_realtime_stocks(sector_name):
         return pd.DataFrame()
 
 # -----------------------------
-# 4️⃣ 核心抓取引擎
+# 4️⃣ 核心抓取引擎（仅保留最近2天新闻）
 # -----------------------------
 @st.cache_data(ttl=300)
 def fetch_news_via_mirror(query=""):
     try:
-        search_query = f"财联社+{query}"
+        search_query = f"财联社 {query}"
         url = f"https://news.google.com/rss/search?q={search_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
         res = requests.get(url, timeout=10)
         root = ElementTree.fromstring(res.content)
         records = []
-        for item in root.findall('.//item')[:15]:
-            records.append({
-                "title": item.find('title').text,
-                "time": item.find('pubDate').text,
-                "link": item.find('link').text
-            })
+        for item in root.findall('.//item')[:30]:  # 取前30条，增加过滤
+            title = item.find('title').text
+            pub_date = item.find('pubDate').text
+            link = item.find('link').text
+            try:
+                pub_dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
+            except:
+                pub_dt = datetime.utcnow()  # 出错就当现在
+
+            # 仅保留最近2天
+            if datetime.utcnow() - pub_dt <= timedelta(days=2):
+                records.append({"title": title, "time": pub_date, "link": link})
         return pd.DataFrame(records)
-    except:
+    except Exception as e:
+        print("抓取失败:", e)
         return pd.DataFrame()
 
 # =========================
 # 5️⃣ Streamlit UI 交互
 # =========================
 
-# 侧边栏：探测控制
 st.sidebar.header("🔍 审计搜索控制台")
 manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：市值管理 / 固态电池")
 probe_trigger = st.sidebar.button("🚀 执行穿透探测", use_container_width=True)
 st.sidebar.divider()
 
-# --- 主屏逻辑切换 ---
-
-# A模式：主动探测模式（当用户点击探测按钮且有输入时）
+# A模式：主动探测
 if probe_trigger and manual_key:
     st.subheader(f"🚀 专项搜索：{manual_key}")
-    with st.spinner(f"正在穿透镜像源抓取 '{manual_key}' 相关线索..."):
+    with st.spinner(f"正在抓取 '{manual_key}' 相关线索..."):
         manual_news = fetch_news_via_mirror(manual_key)
     
     if not manual_news.empty:
@@ -99,14 +102,12 @@ if probe_trigger and manual_key:
         if st.button("⬅️ 重置看板视图"):
             st.rerun()
     else:
-        st.warning(f"未能发现与 '{manual_key}' 相关的突发情报。")
+        st.warning(f"未发现与 '{manual_key}' 相关的最新情报。")
 
-# B模式：默认看板模式
+# B模式：板块默认看板
 else:
-    # 1. 板块深度穿透
     st.subheader("🏭 板块深度穿透")
     selected_sector = st.selectbox("选择审计板块", list(SECTOR_CONFIG.keys()))
-
     col1, col2 = st.columns([1, 2])
 
     with col1:
@@ -124,7 +125,6 @@ else:
         
         if not sector_news.empty:
             for _, row in sector_news.iterrows():
-                # 改为平铺显示，增加扫描效率
                 nc1, nc2 = st.columns([4, 1])
                 with nc1:
                     st.write(f"● {row['title']}")
@@ -132,11 +132,11 @@ else:
                 with nc2:
                     st.link_button("🚀 穿透", row['link'], use_container_width=True)
         else:
-            st.warning(f"💡 暂未发现与 {selected_sector} 相关的实时线索。")
+            st.warning(f"💡 暂未发现与 {selected_sector} 相关的最新线索。")
 
 st.divider()
 
-# 2. 全量流（常驻底部）
+# 全量流
 st.subheader("🔥 实时早盘全量流")
 main_news = fetch_news_via_mirror("并购+回购+IPO+异动")
 if not main_news.empty:
@@ -147,7 +147,7 @@ if not main_news.empty:
         with mc2:
             st.link_button("原文", row['link'])
 else:
-    st.error("数据流受阻，请检查网络环境。")
+    st.error("数据流受阻或近期无新新闻。")
 
 st.markdown("---")
-st.caption("Nova 审计脚注：采用镜像联动逻辑，手动关键词支持全局探测模式。")
+st.caption("Nova 审计脚注：仅显示最近2天内的新闻，支持手动关键词穿透模式。")
