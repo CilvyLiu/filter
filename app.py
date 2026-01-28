@@ -10,24 +10,30 @@ import re
 # 1️⃣ 页面配置
 # -----------------------------
 st.set_page_config(page_title="Nova 2026 穿透看板", page_icon="🛡️", layout="wide")
+
+# --- 缓存刷新逻辑 ---
+def refresh_system():
+    st.cache_data.clear()
+    st.rerun()
+
 st.title("🛡️ 投行级 7D 全网穿透系统")
-st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 腾讯行情+财联社语义穿透")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 腾讯行情 + 财联社语义 + 7D全网穿透")
 
 # -----------------------------
-# 2️⃣ 2026 核心数据字典 (热词逻辑增强)
+# 2️⃣ 2026 核心数据字典 (题材热词增强)
 # -----------------------------
 SECTOR_CONFIG = {
     "机器人/智造": {"keywords": "(机器人 OR 行星丝杠 OR 灵巧手 OR 减速器 OR 具身智能)", "stocks": ["603728", "300024", "002031"]},
     "AI算力/封装": {"keywords": "(玻璃基板 OR HBM4 OR 算力租赁 OR 硅光模块 OR CPO)", "stocks": ["603501", "688012", "002415"]},
-    "商业航天/低空": {"keywords": "(eVTOL OR 千帆星座 OR 低空空域 OR 卫星互联网)", "stocks": ["002085", "600118", "300455"]},
-    "医药/生物": {"keywords": "(GLP-1 OR ADC药物 OR 出海授权 OR 合成生物)", "stocks": ["600276", "300760", "603259"]},
-    "新能源/储能": {"keywords": "(全固态电池 OR 钠电池 OR 构网型储能 OR 钙钛矿)", "stocks": ["300750", "002594", "300274"]},
+    "商业航天/低空": {"keywords": "(eVTOL OR 千帆星座 OR 低空空域 OR 卫星互联网 OR 飞行汽车)", "stocks": ["002085", "600118", "300455"]},
+    "医药/生物": {"keywords": "(GLP-1 OR ADC药物 OR 创新药问询 OR 出海授权 OR 合成生物)", "stocks": ["600276", "300760", "603259"]},
+    "新能源/储能": {"keywords": "(全固态电池 OR 钠离子电池 OR 构网型储能 OR 钙钛矿)", "stocks": ["300750", "002594", "300274"]},
     "重组/科创": {"keywords": "(并购重组 OR 科创板八条 OR 资产注入 OR 举牌 OR 借壳)", "stocks": ["600104", "000157", "600606"]},
-    "地产/宏观": {"keywords": "(收储 OR 存量房贷 OR 房地联动 OR 专项债)", "stocks": ["600048", "000002", "601155"]}
+    "地产/宏观": {"keywords": "(房地产收储 OR 存量房贷 OR 房地联动 OR 降息 OR 专项债)", "stocks": ["600048", "000002", "601155"]}
 }
 
 # -----------------------------
-# 3️⃣ 稳定行情接口：腾讯 Qt
+# 3️⃣ 稳定行情接口：腾讯 Qt (内外网通用)
 # -----------------------------
 @st.cache_data(ttl=60)
 def get_realtime_stocks(sector_name):
@@ -51,21 +57,25 @@ def get_realtime_stocks(sector_name):
         return pd.DataFrame()
 
 # -----------------------------
-# 4️⃣ 核心抓取引擎：Google RSS (7D)
+# 4️⃣ 全网穿透引擎：Google RSS (7D)
 # -----------------------------
 @st.cache_data(ttl=600)
 def fetch_news_via_google(query=""):
     try:
+        # 排除噪音，锁定 7 天内核心财经源
         search_query = f"({query}) (site:cls.cn OR site:jiemian.com OR site:stcn.com OR site:163.com OR site:qq.com OR site:sina.com.cn)"
         url = f"https://news.google.com/rss/search?q={search_query}+when:7d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
         root = ElementTree.fromstring(res.content)
+        
         records = []
         for item in root.findall('.//item')[:25]:
             full_title = item.find('title').text
             title = full_title.rsplit(' - ', 1)[0] if ' - ' in full_title else full_title
             source = full_title.rsplit(' - ', 1)[1] if ' - ' in full_title else "全网"
+            
             records.append({
                 "source": source,
                 "title": title,
@@ -77,30 +87,28 @@ def fetch_news_via_google(query=""):
         return pd.DataFrame()
 
 # -----------------------------
-# 5️⃣ 热词分析 (财联社风格+A股深度扩展)
+# 5️⃣ 热词分析 (财联社过滤逻辑 + A股题材增强)
 # -----------------------------
 def analyze_hot_keywords(df):
     if df.empty: return []
-    # 扩展：过滤非实质性词，保留 A 股核心题材词
+    # 过滤词：剔除新闻废话
     stop_words = [
         "财经", "新闻", "发布", "公司", "中国", "市场", "披露", "进行", "分析", "关注", 
         "研报", "证券", "表示", "机构", "持续", "核心", "板块", "业务", "正式", "亿元"
     ]
-    # 强制关注词（提高权重）
+    # 高权题材词：命中后权重翻倍
     focus_words = [
-        "量产", "破产", "借壳", "重组", "获批", "暴涨", "首发", "订单", "问询", "涨停"
+        "量产", "破产", "借壳", "重组", "获批", "暴涨", "首发", "订单", "问询", "涨停", "具身", "低空"
     ]
     
     text = " ".join(df['title'].tolist())
-    # 匹配中文词
     words = re.findall(r'[\u4e00-\u9fa5]{2,}', text) 
     
     filtered_words = []
     for w in words:
         if w not in stop_words:
-            # 如果是重点词，增加出现权重
             if w in focus_words:
-                filtered_words.extend([w] * 2)
+                filtered_words.extend([w] * 2) # 题材词权重翻倍
             else:
                 filtered_words.append(w)
                 
@@ -110,20 +118,28 @@ def analyze_hot_keywords(df):
 # 6️⃣ UI 交互
 # =========================
 
+# --- 侧边栏 ---
 st.sidebar.header("🔍 审计搜索控制台")
 manual_key = st.sidebar.text_input("注入手动关键词", placeholder="如：人形机器人 / 资产注入")
 probe_trigger = st.sidebar.button("🚀 执行穿透探测", use_container_width=True)
+
+st.sidebar.divider()
+# ✨ 刷新按钮放置于此
+if st.sidebar.button("🔄 强制刷新系统数据", use_container_width=True):
+    refresh_system()
+st.sidebar.caption("提示：点击刷新将清除行情与新闻缓存，重发起探测请求。")
 st.sidebar.divider()
 
 if probe_trigger and manual_key:
-    st.subheader(f"🚀 专项探测：{manual_key} (7D)")
+    st.subheader(f"🚀 专项探测：{manual_key} (7D 全网回溯)")
     news = fetch_news_via_google(manual_key)
     if not news.empty:
         hot_tags = analyze_hot_keywords(news)
-        st.write("🏷️ **动态热词统计：** " + " ".join([f"`{w[0]}({w[1]})`" for w in hot_tags]))
+        st.write("🏷️ **本周热词统计：** " + " ".join([f"`{w[0]}({w[1]})`" for w in hot_tags]))
         st.dataframe(news, use_container_width=True, hide_index=True)
     else:
         st.warning("未能穿透相关线索。")
+
 else:
     # 默认看板
     st.subheader("🏭 行业深度穿透看板")
@@ -135,9 +151,11 @@ else:
         stock_df = get_realtime_stocks(selected_sector)
         if not stock_df.empty:
             st.table(stock_df)
+        else:
+            st.info("腾讯行情接口同步中...")
             
         st.divider()
-        st.write("📈 **舆情热点词云 (财联社风控)**")
+        st.write("📈 **舆情热点分布 (财联社风控)**")
         q_words = SECTOR_CONFIG[selected_sector]["keywords"]
         sector_news = fetch_news_via_google(q_words)
         hot_tags = analyze_hot_keywords(sector_news)
@@ -159,12 +177,14 @@ else:
                     c_b.link_button("穿透", row['link'], use_container_width=True)
                     st.divider()
         else:
-            st.warning("⚠️ 探测受阻。")
+            st.warning("⚠️ 探测受阻。请检查网络镜像连通性。")
 
 st.divider()
+# 底部全局异动流
 st.subheader("🔥 市场全局异动流 (7D回溯)")
 main_news = fetch_news_via_google("并购重组 OR 股权转让 OR 异动 OR 举牌 OR 可转债")
 if not main_news.empty:
     st.dataframe(main_news[['time', 'source', 'title']], use_container_width=True, hide_index=True)
 
-st.caption("Nova 审计脚注：采用腾讯 Qt + Google 7D 镜像穿透。热词统计已整合 A 股题材深度模型。")
+st.markdown("---")
+st.caption("Nova 审计脚注：已集成财联社题材热词过滤模型。系统采用腾讯 Qt 行情源，确保内外网环境审计稳定性。")
