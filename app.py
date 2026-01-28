@@ -3,14 +3,13 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 from xml.etree import ElementTree
-from email.utils import parsedate_to_datetime
 
 # -----------------------------
 # 1️⃣ 页面配置
 # -----------------------------
 st.set_page_config(page_title="Nova 投行级穿透看板", page_icon="🛡️", layout="wide")
 st.title("🛡️ 投行级新闻板块穿透系统")
-st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 自动穿透板块关键词")
+st.caption(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 模式: 自动穿透板块关键词（国内来源）")
 
 # -----------------------------
 # 2️⃣ 核心数据字典
@@ -49,34 +48,36 @@ def get_realtime_stocks(sector_name):
         return pd.DataFrame()
 
 # -----------------------------
-# 4️⃣ 自动抓取板块新闻（最近7天）
+# 4️⃣ 国内 RSS 自动抓取板块新闻（最近7天）
 # -----------------------------
 @st.cache_data(ttl=300)
-def fetch_news_for_sector(sector_name, days=7):
+def fetch_news_for_sector_cn(sector_name, days=7):
     try:
         keywords = SECTOR_CONFIG.get(sector_name, {}).get("keywords", [])
         if not keywords:
             return pd.DataFrame()
-        
+
         records = []
-        # 针对每个关键词抓取
         for kw in keywords:
-            search_query = f"财联社 {kw}"
-            url = f"https://news.google.com/rss/search?q={search_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-            res = requests.get(url, timeout=10)
-            root = ElementTree.fromstring(res.content)
-            for item in root.findall('.//item')[:50]:
-                title = item.find('title').text
-                pub_date = item.find('pubDate').text
-                link = item.find('link').text
-                try:
-                    pub_dt = parsedate_to_datetime(pub_date)
-                except:
-                    pub_dt = datetime.utcnow()
-                if datetime.utcnow() - pub_dt <= timedelta(days=days):
-                    records.append({"title": title, "time": pub_dt, "link": link})
-        
-        # 去重标题并按时间排序
+            # 新浪财经 RSS 搜索接口
+            rss_url = f"http://search.sina.com.cn/?q={kw}&c=news&sort=time&range=all&col=&source=&time=&from=channel&num=50&dpc=0&format=rss"
+            try:
+                res = requests.get(rss_url, timeout=10)
+                root = ElementTree.fromstring(res.content)
+                for item in root.findall('.//item'):
+                    title = item.find('title').text
+                    link = item.find('link').text
+                    pub_date = item.find('pubDate')
+                    if pub_date is not None:
+                        pub_dt = datetime.strptime(pub_date.text, "%a, %d %b %Y %H:%M:%S %Z")
+                    else:
+                        pub_dt = datetime.utcnow()
+                    if datetime.utcnow() - pub_dt <= timedelta(days=days):
+                        records.append({"title": title, "time": pub_dt, "link": link})
+            except:
+                continue
+
+        # 去重、排序
         df = pd.DataFrame(records)
         if not df.empty:
             df.drop_duplicates(subset=['title'], inplace=True)
@@ -109,7 +110,7 @@ with col1:
 with col2:
     st.write(f"📰 **{selected_sector}** 板块关联动态：")
     if probe_trigger:
-        sector_news = fetch_news_for_sector(selected_sector)
+        sector_news = fetch_news_for_sector_cn(selected_sector)
         if not sector_news.empty:
             for _, row in sector_news.iterrows():
                 nc1, nc2 = st.columns([4, 1])
@@ -125,7 +126,7 @@ st.divider()
 
 # 全量流
 st.subheader("🔥 实时早盘全量流")
-main_news = fetch_news_for_sector("综合/重组")
+main_news = fetch_news_for_sector_cn("综合/重组")
 if not main_news.empty:
     for _, row in main_news.head(10).iterrows():
         mc1, mc2 = st.columns([5, 1])
@@ -137,4 +138,4 @@ else:
     st.error("数据流受阻或近期无新新闻。")
 
 st.markdown("---")
-st.caption("Nova 审计脚注：新闻自动提取板块关键词，最近7天内，已去重并按时间排序。")
+st.caption("Nova 审计脚注：新闻自动提取板块关键词（国内来源），最近7天内，已去重并按时间排序。")
