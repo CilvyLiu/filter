@@ -135,6 +135,11 @@ if probe_trigger and manual_key:
     st.subheader(f"🚀 专项探测：{manual_key} (7D 全网回溯)")
     news = fetch_news_via_google(manual_key)
     if not news.empty:
+        import io
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+            news.to_excel(writer, index=False)
+        st.download_button("📥 导出专项探测 Excel", buf.getvalue(), f"专项_{manual_key}.xlsx", "application/vnd.ms-excel", use_container_width=True)
         hot_tags = analyze_hot_keywords(news)
         st.write("🏷️ **本周热词统计：** " + " ".join([f"`{w[0]}({w[1]})`" for w in hot_tags]))
         st.dataframe(news, use_container_width=True, hide_index=True)
@@ -170,6 +175,12 @@ else:
     with col2:
         st.write(f"📰 **{selected_sector}** 7D 关键动态穿透：")
         if not sector_news.empty:
+            import io
+            buf_s = io.BytesIO()
+            with pd.ExcelWriter(buf_s, engine='xlsxwriter') as writer:
+                sector_news.to_excel(writer, index=False)
+            st.download_button(f"📥 提取{selected_sector}简报", buf_s.getvalue(), f"行业_{selected_sector}.xlsx", "application/vnd.ms-excel")
+        if not sector_news.empty:
             for _, row in sector_news.iterrows():
                 with st.container():
                     c_a, c_b = st.columns([5, 1])
@@ -183,8 +194,13 @@ else:
 st.divider()
 # 底部全局异动流
 st.subheader("🔥 市场全局异动流 (7D回溯)")
-main_news = fetch_news_via_google("并购重组 OR 股权转让 OR 异动 OR 举牌 OR 可转债")
+main_news = fetch_news_via_google("并购重组 OR 股权转让 OR 异动 OR 举牌 OR 可转债 OR 质押 OR 融资 OR 融券")
 if not main_news.empty:
+    import io
+    buf_m = io.BytesIO()
+    with pd.ExcelWriter(buf_m, engine='xlsxwriter') as writer:
+        main_news.to_excel(writer, index=False)
+    st.download_button("🛰️ 导出全局异动流 Excel", buf_m.getvalue(), "全局异动.xlsx", "application/vnd.ms-excel", use_container_width=True)
     st.dataframe(main_news[['time', 'source', 'title']], use_container_width=True, hide_index=True)
 
 st.markdown("---")
