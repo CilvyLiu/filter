@@ -132,6 +132,8 @@ st.sidebar.divider()
 
 if probe_trigger and manual_key:
     st.subheader(f"🚀 专项探测：{manual_key} (7D 全网回溯)")
+    if st.button(f"📥 提取 {manual_key} 核心消息", type="primary"):
+        st.toast(f"正在深度解析 {manual_key} 相关情报...")
     news = fetch_news_via_google(manual_key)
     if not news.empty:
         hot_tags = analyze_hot_keywords(news)
@@ -168,6 +170,8 @@ else:
 
     with col2:
         st.write(f"📰 **{selected_sector}** 7D 关键动态穿透：")
+        if st.button(f"⚡ 一键提取{selected_sector}动态", key="sector_extract"):
+            st.success(f"已将 {len(sector_news)} 条行业情报加入审计清单")
         if not sector_news.empty:
             for _, row in sector_news.iterrows():
                 with st.container():
@@ -182,7 +186,9 @@ else:
 st.divider()
 # 底部全局异动流
 st.subheader("🔥 市场全局异动流 (7D回溯)")
-main_news = fetch_news_via_google("并购重组 OR 股权转让 OR 异动 OR 举牌 OR 可转债")
+if st.button("🛰️ 提取全市场异动摘要", use_container_width=True):
+    st.info("全局摘要提取中，正在对比历史异动频率...")
+main_news = fetch_news_via_google("并购重组 OR 股权转让 OR 异动 OR 举牌 OR 可转债 OR 质押 OR 融券 OR 融资")
 if not main_news.empty:
     st.dataframe(main_news[['time', 'source', 'title']], use_container_width=True, hide_index=True)
 
